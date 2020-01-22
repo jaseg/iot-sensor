@@ -7,6 +7,7 @@ from uhashlib import sha256
 import binascii
 import math
 import urequests
+import ntptime
 
 
 ######################################################## CONFIG ########################################################
@@ -19,6 +20,7 @@ import urequests
 # NOTIFICATION_SECRET = b'Your notification proxy secret for this endpoint'
 #
 # NOTIFICATION_COOLDOWN = 60 # how long to wait after sending a notification before sending the next, in seconds
+# HEARTBEAT_INTERVAL = 60 # seconds
 #
 # Detection settings
 # MEAN_LEN = 8 # Window length for DC offset determination in seconds (1024ms to be exact)
@@ -86,8 +88,11 @@ def uhmac(key, data):
     outer.update(inner.digest())
     return outer.digest()
 
-def usign(secret, payload=None, seq=None):
-    payload = {'time': int(time.time()), 'd': payload}
+def unix_time():
+    return int(time.time()) + 946684800 # ESP32 counts from 2000-01-01, unix from 1970-01-01
+
+def usign(secret, scope, payload=None, seq=None):
+    payload = {'time': unix_time(), 'scope': scope, 'd': payload}
     if seq is not None:
         payload['seq'] = seq
 
@@ -96,30 +101,35 @@ def usign(secret, payload=None, seq=None):
 
     return ujson.dumps({'payload': payload, 'auth': auth})
 
-def notify(**kwargs):
-    data = usign(NOTIFICATION_SECRET, kwargs)
-    print(time.time(), 'Notifying', NOTIFICATION_URL)
+def notify(scope, **kwargs):
+    data = usign(NOTIFICATION_SECRET, scope, kwargs)
+    print(unix_time(), 'Notifying', NOTIFICATION_URL)
     urequests.post(NOTIFICATION_URL, data=data, headers={'Content-Type': 'application/json'})
-
-def klingel_notify(rms, capture):
-    notify(rms=rms, capture=capture)
 
 def loop():
     global rms, capture
+    last_notification, last_heartbeat = 0, 0
     while True:
-        if rms > RMS_THRESHOLD:
-            wifi_connect()
-            old_capture = capture
-            rms = 0
-            while rms == 0:
-                time.sleep(0.1)
-            rms = 0
-            klingel_notify(rms, [old_capture, capture])
-            time.sleep(NOTIFICATION_COOLDOWN)
+        now = unix_time()
+        if (now - last_notification) > NOTIFICATION_COOLDOWN and rms > RMS_THRESHOLD:
+                wifi_connect()
+                old_capture = capture
+                rms = 0
+                while rms == 0:
+                    time.sleep(0.1)
+                rms = 0
+                notify('default', rms=rms, capture=[old_capture, capture])
+                last_notification = now
+
+        if (now - last_heartbeat) > HEARTBEAT_INTERVAL:
+            notify('heartbeat')
+            last_heartbeat = now
 
         time.sleep(0.1)
 
 wifi_connect()
+ntptime.settime()
 start_sampling()
+notify('boot')
 loop()
 
