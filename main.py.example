@@ -1,5 +1,5 @@
 
-from machine import Pin, ADC, Timer
+from machine import Pin, ADC, Timer, WDT, reset
 import network
 import time
 import ujson
@@ -102,30 +102,59 @@ def usign(secret, scope, payload=None, seq=None):
     return ujson.dumps({'payload': payload, 'auth': auth})
 
 def notify(scope, **kwargs):
+    wifi_connect()
     data = usign(NOTIFICATION_SECRET, scope, kwargs)
     print(unix_time(), 'Notifying', NOTIFICATION_URL)
     urequests.post(NOTIFICATION_URL, data=data, headers={'Content-Type': 'application/json'})
 
+
+def format_exc(limit=None, chain=True):
+    return "".join(repr(i) for i in sys.exc_info())
+
 def loop():
     global rms, capture
     last_notification, last_heartbeat = 0, 0
+    n_exc, last_exc_clear = 0, unix_time()
+    last_ntp_sync = unix_time()
+
+    wdt = WDT(timeout=60000)
+
     while True:
-        now = unix_time()
-        if (now - last_notification) > NOTIFICATION_COOLDOWN and rms > RMS_THRESHOLD:
+        try:
+            now = unix_time()
+            if (now - last_notification) > NOTIFICATION_COOLDOWN and rms > RMS_THRESHOLD:
+                    old_capture = capture
+                    rms = 0
+                    while rms == 0:
+                        time.sleep(0.1)
+                    rms = 0
+                    notify('default', rms=rms, capture=[old_capture, capture])
+                    last_notification = now
+
+            if (now - last_heartbeat) > HEARTBEAT_INTERVAL:
+                notify('heartbeat')
+                last_heartbeat = now
+
+            if (now - last_ntp_sync) > 3600 * 24:
                 wifi_connect()
-                old_capture = capture
-                rms = 0
-                while rms == 0:
-                    time.sleep(0.1)
-                rms = 0
-                notify('default', rms=rms, capture=[old_capture, capture])
-                last_notification = now
+                ntptime.settime()
+                last_ntp_sync = now
 
-        if (now - last_heartbeat) > HEARTBEAT_INTERVAL:
-            notify('heartbeat')
-            last_heartbeat = now
+            if (now - last_exc_clear) > 300:
+                if n_exc > 0:
+                    n_exc -= 1
+                last_exc_clear = now
 
-        time.sleep(0.1)
+            wdt.feed()
+
+        except:
+            notify('error', e=format_exc())
+            n_exc += 1
+            if n_exc >= 5:
+                reset()
+
+        finally:
+            time.sleep(0.1)
 
 wifi_connect()
 ntptime.settime()
