@@ -108,6 +108,46 @@ def notify(scope, **kwargs):
     urequests.post(NOTIFICATION_URL, data=data, headers={'Content-Type': 'application/json'})
 
 
+def classify(trace, mean):
+    runs = []
+    cur_sign, cur_run = 1, 0
+    for x in trace[len(trace)//2:]:
+        x -= mean
+        if x > 0 and cur_sign < 0:
+            runs.append(cur_run)
+            cur_sign = 1
+            cur_run = 0
+        elif x < 0 and cur_sign >= 0:
+            runs.append(cur_run)
+            cur_sign = -1
+            cur_run = 0
+        else:
+            cur_run += 1
+    
+    run_means = []
+    for start in range(0, len(runs), 8):
+        k = 32
+        run_means.append(sum(runs[start:start+k])/k)
+        
+    bin_low, bin_high = 0, 0
+    for e in run_means:
+        if 0.05 < e < 0.25:
+            bin_low += 1
+        elif 0.30 < e < 0.50:
+            bin_high += 1
+    total = len(run_means)
+    
+    bin_low /= total
+    bin_high /= total
+    
+    if 0.3 < bin_low < 0.7 and 0.3 < bin_high < 0.7:
+        return 'downstairs'
+    elif bin_low < 0.3 and bin_high > 0.7:
+        return 'upstairs'
+    else:
+        return 'none'
+        
+
 def format_exc(limit=None, chain=True):
     return "".join(repr(i) for i in sys.exc_info())
 
@@ -124,11 +164,15 @@ def loop():
             now = unix_time()
             if (now - last_notification) > NOTIFICATION_COOLDOWN and rms > RMS_THRESHOLD:
                     old_capture = capture
+                    classification = classify(capture, mean)
                     rms = 0
                     while rms == 0:
                         time.sleep(0.1)
                     rms = 0
-                    notify('default', rms=rms, capture=[old_capture, capture])
+                    if classification in ('downstairs', 'upstairs'):
+                        notify('default', classification=classification, rms=rms, capture=[old_capture, capture])
+                    else:
+                        notify('info', info_msg='Unclassified capture', rms=rms, capture=[old_capture, capture])
                     last_notification = now
 
             if (now - last_heartbeat) > HEARTBEAT_INTERVAL:
